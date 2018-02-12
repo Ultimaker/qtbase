@@ -1,3 +1,4 @@
+
 /****************************************************************************
 **
 ** Copyright (C) 2016 The Qt Company Ltd.
@@ -51,16 +52,36 @@
 #include <QGuiApplication>
 #include <QPainter>
 #include <QtFbSupport/private/qfbcursor_p.h>
+#include <QtFbSupport/private/qfbbackingstore_p.h>
 #include <QtFbSupport/private/qfbwindow_p.h>
 #include <QtKmsSupport/private/qkmsdevice_p.h>
 #include <QtCore/private/qcore_unix_p.h>
 #include <sys/mman.h>
 
+#include <qpa/qwindowsysteminterface.h>
+
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <linux/i2c-dev.h>
+
+extern "C" {
+    #include "i2cbusses.h"
+    #include "util.h"
+}
+
 QT_BEGIN_NAMESPACE
 
 Q_LOGGING_CATEGORY(qLcFbDrm, "qt.qpa.fb")
+Q_LOGGING_CATEGORY(qLcFbDrmTiming, "qt.qpa.drmtiming")
 
-static const int BUFFER_COUNT = 2;
+static const int BUFFER_COUNT = 3;
+
+#define FRAME_TIME_HEIGHT 5
+#define FRAME_RATE 61.3         
 
 class QLinuxFbDevice : public QKmsDevice
 {
@@ -76,12 +97,16 @@ public:
     };
 
     struct Output {
-        Output() : backFb(0), flipped(false) { }
+        Output() : backFb(0), flipped(false), lastSequence(0), lastFramesDropped(0), lastRenderFinished(0) { }
         QKmsOutput kmsOutput;
         Framebuffer fb[BUFFER_COUNT];
         QRegion dirty[BUFFER_COUNT];
         int backFb;
         bool flipped;
+        unsigned int lastSequence;
+        unsigned int lastFramesDropped;
+        qint64 lastRenderFinished;
+
         QSize currentRes() const {
             const drmModeModeInfo &modeInfo(kmsOutput.modes[kmsOutput.mode]);
             return QSize(modeInfo.hdisplay, modeInfo.vdisplay);
@@ -116,12 +141,20 @@ private:
     static void pageFlipHandler(int fd, unsigned int sequence,
                                 unsigned int tv_sec, unsigned int tv_usec, void *user_data);
 
+    QRegion drawFrameTimeBar(Output *output, qint64 waitTime);
+
     QVector<Output> m_outputs;
+    QElapsedTimer m_timer;
+
+    bool m_showDroppedFrames;
 };
 
 QLinuxFbDevice::QLinuxFbDevice(QKmsScreenConfig *screenConfig)
     : QKmsDevice(screenConfig, QStringLiteral("/dev/dri/card0"))
 {
+    m_timer.start();
+
+    m_showDroppedFrames = qEnvironmentVariableIntValue("QT_QPA_FB_DRM_SHOWDROPPEDFRAMES") != 0;
 }
 
 bool QLinuxFbDevice::open()
@@ -232,7 +265,7 @@ bool QLinuxFbDevice::createFramebuffer(QLinuxFbDevice::Output *output, int buffe
     qCDebug(qLcFbDrm, "FB is %u, mapped at %p", fb.fb, fb.p);
     memset(fb.p, 0, fb.size);
 
-    fb.wrapper = QImage(static_cast<uchar *>(fb.p), w, h, fb.pitch, QImage::Format_ARGB32);
+    fb.wrapper = QImage(static_cast<uchar *>(fb.p), w, h, fb.pitch, QImage::Format_RGB32);
 
     return true;
 }
@@ -245,7 +278,7 @@ void QLinuxFbDevice::createFramebuffers()
                 return;
         }
         output.backFb = 0;
-        output.flipped = false;
+        output.flipped = true;
     }
 }
 
@@ -294,24 +327,65 @@ void QLinuxFbDevice::pageFlipHandler(int fd, unsigned int sequence,
                                      void *user_data)
 {
     Q_UNUSED(fd);
-    Q_UNUSED(sequence);
     Q_UNUSED(tv_sec);
     Q_UNUSED(tv_usec);
 
     Output *output = static_cast<Output *>(user_data);
-    output->backFb = (output->backFb + 1) % BUFFER_COUNT;
+    output->flipped = true;
+
+    unsigned int framesDropped = sequence - output->lastSequence - 1;
+    if (framesDropped > 0)
+        qCDebug(qLcFbDrmTiming) << "Frames dropped: " << framesDropped;            
+
+    output->lastFramesDropped = framesDropped;
+    output->lastSequence = sequence;
+}
+
+QRegion QLinuxFbDevice::drawFrameTimeBar(Output *output, qint64 frameTime)
+{
+    const uint32_t width = output->currentRes().width();
+    int *p = (int*)(output->fb[output->backFb].p);
+    
+    // full width is the time it takes to display two frames
+    // reason: because of triple buffering, it is possible to render a (single) frame in twice the frame time and still be in time if the
+    // previous frame was very fast
+    float frameTimeFraction = (float)frameTime / (2 * 1000000000 / FRAME_RATE);
+    if (frameTimeFraction > 1)
+        frameTimeFraction = 1;
+
+    uint32_t len = (int)(width * frameTimeFraction);
+    for (uint32_t y= 0; y<FRAME_TIME_HEIGHT; y++)
+    {
+        int offset = y * width;
+        for (uint32_t x=0; x<len; x++)
+            p[offset++] = 0xffffffff;
+    }
+    QRegion dirtyRegion(0, 0, len, FRAME_TIME_HEIGHT);
+
+    if (output->lastFramesDropped > 0)
+    {
+        for (uint32_t y= 0; y<50; y++)
+        {
+            int offset = y * width + width - 50;      
+            for (uint32_t x=0; x<50; x++)
+                p[offset++] = 0x00ff0000;
+        }
+        dirtyRegion += QRect(width-50, 0, 50, 50);
+    }
+
+    return dirtyRegion;
 }
 
 void QLinuxFbDevice::swapBuffers(Output *output)
 {
-    Framebuffer &fb(output->fb[output->backFb]);
-    if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
-        qErrnoWarning(errno, "Page flip failed");
-        return;
-    }
+    // qCDebug(qLcFbDrm, "SwapBuffers enter");
+    // qCDebug(qLcFbDrm, "SwapBuffers wait start");
 
-    const int fbIdx = output->backFb;
-    while (output->backFb == fbIdx) {
+    // qCDebug(qLcFbDrmTiming) << "SwapBuffers wait start";    
+
+    qint64 frameTime = m_timer.nsecsElapsed() - output->lastRenderFinished;       
+
+    while (!output->flipped) {
         drmEventContext drmEvent;
         memset(&drmEvent, 0, sizeof(drmEvent));
         drmEvent.version = DRM_EVENT_CONTEXT_VERSION;
@@ -321,13 +395,43 @@ void QLinuxFbDevice::swapBuffers(Output *output)
         // and calls back pageFlipHandler once the flip completes.
         drmHandleEvent(fd(), &drmEvent);
     }
+    
+    // qCDebug(qLcFbDrmTiming) << "Frame time: " << (frameTime / 1000000);            
+
+    output->flipped = false;
+
+    // qCDebug(qLcFbDrm, "SwapBuffers wait finished");
+
+    // Sleep seems to be necessary, otherwise page flips are not always executed propertly. To be investigated.
+    usleep(1000);
+    
+    if (m_showDroppedFrames)
+    {
+        QRegion frameTimeRegion = drawFrameTimeBar(output, frameTime);
+        output->dirty[output->backFb] += frameTimeRegion;
+    }
+
+    // schedule page flip
+    Framebuffer &fb(output->fb[output->backFb]);
+    if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
+        qErrnoWarning(errno, "Page flip failed");
+        return;
+    }
+
+    // immediately advance back buffer, because there are three buffers
+    output->backFb = (output->backFb + 1) % BUFFER_COUNT;
+
+    output->lastRenderFinished = m_timer.nsecsElapsed();
 }
 
 QLinuxFbDrmScreen::QLinuxFbDrmScreen(const QStringList &args)
     : m_screenConfig(nullptr),
-      m_device(nullptr)
+      m_device(nullptr),
+      m_lastPos(0, 0)
 {
     Q_UNUSED(args);
+
+    m_clearFrames = qEnvironmentVariableIntValue("QT_QPA_FB_DRM_CLEARFRAMES") != 0;
 }
 
 QLinuxFbDrmScreen::~QLinuxFbDrmScreen()
@@ -358,7 +462,7 @@ bool QLinuxFbDrmScreen::initialize()
 
     mGeometry = QRect(QPoint(0, 0), output->currentRes());
     mDepth = 32;
-    mFormat = QImage::Format_ARGB32;
+    mFormat = QImage::Format_RGB32;
     mPhysicalSize = output->kmsOutput.physical_size;
     qCDebug(qLcFbDrm) << mGeometry << mPhysicalSize;
 
@@ -366,34 +470,196 @@ bool QLinuxFbDrmScreen::initialize()
 
     mCursor = new QFbCursor(this);
 
+    m_timer.start();
+    m_lastFrameTime = 0;
+    m_lastFrameSetTime = 0;
+    m_frameCounter = 0;
+
+    startTouch();    
+
     return true;
+}
+
+void QLinuxFbDrmScreen::startTouch()
+{
+    int i2cbus = 4, address = 0x38;
+	int pec = 0;
+	int force = 0;
+    char filename[20];
+    
+	m_i2cfile = open_i2c_dev(i2cbus, filename, sizeof(filename), 0);
+	if (m_i2cfile < 0
+     || set_slave_addr(m_i2cfile, address, force))
+    {
+        qCDebug(qLcFbDrm) << "I2C error" ;
+        return;
+    }
+
+	if (pec && ioctl(m_i2cfile, I2C_PEC, 1) < 0) {
+		qCDebug(qLcFbDrm) << "Error: Could not set PEC: " << strerror(errno);
+		close(m_i2cfile);
+        return;
+    }
+
+    QTimer *timer = new QTimer(this);
+    connect(timer, SIGNAL(timeout()), this, SLOT(readTouch()));
+    timer->start(10);
+}
+
+void QLinuxFbDrmScreen::readTouch()
+{
+    //qCDebug(qLcFbDrm) << "Read touch" ;
+
+    int touch  = i2c_smbus_read_byte_data(m_i2cfile, 2);
+	if (touch)
+	{
+		int y = i2c_smbus_read_byte_data(m_i2cfile, 4) + 256 *(i2c_smbus_read_byte_data(m_i2cfile,  3) & 15);
+		int x = i2c_smbus_read_byte_data(m_i2cfile, 6) + 256 *(i2c_smbus_read_byte_data(m_i2cfile,  5) & 15);
+
+        // qCDebug(qLcFbDrm) << "Read touch" << x << y ;
+        m_lastPos.setX(x);
+        m_lastPos.setY(y);
+        
+        QWindowSystemInterface::handleMouseEvent(0, m_lastPos, m_lastPos, Qt::LeftButton);
+
+    } else {
+        QWindowSystemInterface::handleMouseEvent(0, m_lastPos, m_lastPos, Qt::NoButton);
+    }
+}
+
+
+QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDirtyRegion, QImage &destination)
+{
+    qCDebug(qLcFbDrm) << "prevFramesDirtyRegion" << prevFramesDirtyRegion;
+    qCDebug(qLcFbDrm) << "mRepaintRegion" << mRepaintRegion;
+
+    const QPoint screenOffset = mGeometry.topLeft();
+    QRegion touchedRegion;
+    
+    // cursor disabled
+
+    // if (mCursor && mCursor->isDirty() && mCursor->isOnScreen()) {
+    //     const QRect lastCursor = mCursor->dirtyRect();
+    //     mRepaintRegion += lastCursor;
+    // }
+
+     if (mRepaintRegion.isEmpty()) // && (!mCursor || !mCursor->isDirty()))
+    {
+         qCDebug(qLcFbDrm) << "empty repaint region";
+
+         qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
+         return touchedRegion;
+    }
+
+    QPainter mPainter(&destination);
+    mPainter.setCompositionMode(QPainter::CompositionMode_Source);
+
+    if (m_clearFrames)
+    {
+        mPainter.fillRect(destination.rect(), Qt::white);
+    }
+
+    touchedRegion += mRepaintRegion;
+    mRepaintRegion += prevFramesDirtyRegion;
+
+    qCDebug(qLcFbDrm) << "draw region to framebuffer" << mRepaintRegion;
+
+    const QVector<QRect> rects = mRepaintRegion.rects();
+    const QRect screenRect = mGeometry.translated(-screenOffset);
+    for (int rectIndex = 0; rectIndex < mRepaintRegion.rectCount(); rectIndex++) {
+        const QRect rect = rects[rectIndex].intersected(screenRect);
+        if (rect.isEmpty())
+            continue;
+
+        // background clearing disabled (performance benefit)
+            
+        // mPainter.fillRect(rect, mScreenImage.hasAlphaChannel() ? Qt::transparent : Qt::black);
+
+        for (int layerIndex = mWindowStack.size() - 1; layerIndex != -1; layerIndex--) {
+            if (!mWindowStack[layerIndex]->window()->isVisible())
+                continue;
+
+            const QRect windowRect = mWindowStack[layerIndex]->geometry().translated(-screenOffset);
+            const QRect windowIntersect = rect.translated(-windowRect.left(), -windowRect.top());
+            QFbBackingStore *backingStore = mWindowStack[layerIndex]->backingStore();
+            if (backingStore) {
+                backingStore->lock();
+                mPainter.drawImage(rect, backingStore->image(), windowIntersect);
+                backingStore->unlock();
+            }
+        }
+    }
+
+    // cursor disabled
+
+    // if (mCursor && (mCursor->isDirty() || mRepaintRegion.intersects(mCursor->lastPainted()))) {
+    //     mPainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    //     touchedRegion += mCursor->drawCursor(mPainter);
+    // }
+    
+    mRepaintRegion = QRegion();
+    
+    qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
+    return touchedRegion;
 }
 
 QRegion QLinuxFbDrmScreen::doRedraw()
 {
-    const QRegion dirty = QFbScreen::doRedraw();
-    if (dirty.isEmpty())
-        return dirty;
+    auto doRedrawStart = m_timer.nsecsElapsed();
 
     QLinuxFbDevice::Output *output(m_device->output(0));
 
+    qCDebug(qLcFbDrm, "drawing into buffer %d", output->backFb);
+    
+    const QRegion dirty = doRedrawFromBackingStores(output->dirty[output->backFb], output->fb[output->backFb].wrapper);
+    if (dirty.isEmpty())
+        return dirty;
+
+    // qCDebug(qLcFbDrm, "doRedraw after QFbScreen::doRedraw");
+
     for (int i = 0; i < BUFFER_COUNT; ++i)
-        output->dirty[i] += dirty;
+    {
+        QRegion newDirty = output->dirty[i] + dirty;
+
+        if (i != output->backFb)
+        {
+            qCDebug(qLcFbDrm) << "Updating dirty region of buffer" << i << "from" << output->dirty[i] << "to" << newDirty;           
+        }
+
+        output->dirty[i] = newDirty;
+    }
 
     if (output->fb[output->backFb].wrapper.isNull())
         return dirty;
 
-    QPainter pntr(&output->fb[output->backFb].wrapper);
-    // Image has alpha but no need for blending at this stage.
-    // Do not waste time with the default SourceOver.
-    pntr.setCompositionMode(QPainter::CompositionMode_Source);
-    for (const QRect &rect : qAsConst(output->dirty[output->backFb]))
-        pntr.drawImage(rect, mScreenImage, rect);
-    pntr.end();
 
-    output->dirty[output->backFb] = QRegion();
+    QRegion newDirtyRegion;
+
+    // always redraw frame time bar area
+    // QRect frameTimeRect(0, 0, output->currentRes().width(), FRAME_TIME_HEIGHT);
+    // newDirtyRegion += QRegion(frameTimeRect);
+
+    output->dirty[output->backFb] = newDirtyRegion;
 
     m_device->swapBuffers(output);
+
+    auto thisTime = m_timer.nsecsElapsed();
+    // auto frameTime = thisTime - m_lastFrameTime;
+    m_lastFrameTime = thisTime;
+
+    // qCDebug(qLcFbDrmTiming) << "Draw to framebuffer complete, realFrameDelta" << frameTime / 1000000 << "ms";           
+
+    const int frameSetSize = 100;
+
+    m_frameCounter++;
+    if (m_frameCounter % frameSetSize == 0)
+    {
+        auto fps = 1000000000.0 / ((thisTime - m_lastFrameSetTime) / frameSetSize);
+        qCDebug(qLcFbDrmTiming) << "FPS: " << fps;           
+        m_lastFrameSetTime = thisTime;
+    }
+
+    qCDebug(qLcFbDrm) << "QLinuxFbDrmScreen::doRedraw executed in " << (m_timer.nsecsElapsed() - doRedrawStart) / 1000000 << "ms";           
 
     return dirty;
 }

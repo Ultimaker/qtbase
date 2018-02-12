@@ -12,10 +12,12 @@ qtHaveModule(input_support-private): \
 
 SOURCES = main.cpp \
           qlinuxfbintegration.cpp \
-          qlinuxfbscreen.cpp
+          qlinuxfbscreen.cpp \
+          i2cbusses.c util.c 
 
 HEADERS = qlinuxfbintegration.h \
-          qlinuxfbscreen.h
+          qlinuxfbscreen.h \
+          i2cbusses.h util.h
 
 qtHaveModule(kms_support-private) {
     QT += kms_support-private
