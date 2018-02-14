@@ -66,12 +66,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <linux/i2c-dev.h>
-
-extern "C" {
-    #include "i2cbusses.h"
-    #include "util.h"
-}
 
 QT_BEGIN_NAMESPACE
 
@@ -475,58 +469,8 @@ bool QLinuxFbDrmScreen::initialize()
     m_lastFrameSetTime = 0;
     m_frameCounter = 0;
 
-    startTouch();    
-
     return true;
 }
-
-void QLinuxFbDrmScreen::startTouch()
-{
-    int i2cbus = 4, address = 0x38;
-	int pec = 0;
-	int force = 0;
-    char filename[20];
-    
-	m_i2cfile = open_i2c_dev(i2cbus, filename, sizeof(filename), 0);
-	if (m_i2cfile < 0
-     || set_slave_addr(m_i2cfile, address, force))
-    {
-        qCDebug(qLcFbDrm) << "I2C error" ;
-        return;
-    }
-
-	if (pec && ioctl(m_i2cfile, I2C_PEC, 1) < 0) {
-		qCDebug(qLcFbDrm) << "Error: Could not set PEC: " << strerror(errno);
-		close(m_i2cfile);
-        return;
-    }
-
-    QTimer *timer = new QTimer(this);
-    connect(timer, SIGNAL(timeout()), this, SLOT(readTouch()));
-    timer->start(10);
-}
-
-void QLinuxFbDrmScreen::readTouch()
-{
-    //qCDebug(qLcFbDrm) << "Read touch" ;
-
-    int touch  = i2c_smbus_read_byte_data(m_i2cfile, 2);
-	if (touch)
-	{
-		int y = i2c_smbus_read_byte_data(m_i2cfile, 4) + 256 *(i2c_smbus_read_byte_data(m_i2cfile,  3) & 15);
-		int x = i2c_smbus_read_byte_data(m_i2cfile, 6) + 256 *(i2c_smbus_read_byte_data(m_i2cfile,  5) & 15);
-
-        // qCDebug(qLcFbDrm) << "Read touch" << x << y ;
-        m_lastPos.setX(x);
-        m_lastPos.setY(y);
-        
-        QWindowSystemInterface::handleMouseEvent(0, m_lastPos, m_lastPos, Qt::LeftButton);
-
-    } else {
-        QWindowSystemInterface::handleMouseEvent(0, m_lastPos, m_lastPos, Qt::NoButton);
-    }
-}
-
 
 QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDirtyRegion, QImage &destination)
 {

@@ -68,13 +68,11 @@ private:
     int m_frameCounter;
 
     QRegion doRedrawFromBackingStores(const QRegion& prevFramesDirtyRegion, QImage &destination);
-    void startTouch();
-    int m_i2cfile;
     QPoint m_lastPos;
 
     bool m_clearFrames;
 private Q_SLOTS:
-    void readTouch();
+    
 };
 
 QT_END_NAMESPACE
