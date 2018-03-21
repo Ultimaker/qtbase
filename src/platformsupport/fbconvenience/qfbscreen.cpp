@@ -171,7 +171,7 @@ void QFbScreen::scheduleUpdate()
 {
     if (!mUpdatePending) {
         mUpdatePending = true;
-        QCoreApplication::postEvent(this, new QEvent(QEvent::UpdateRequest));
+        // QCoreApplication::postEvent(this, new QEvent(QEvent::UpdateRequest));
     }
 }
 
@@ -193,6 +193,12 @@ void QFbScreen::setGeometry(const QRect &rect)
 bool QFbScreen::initialize()
 {
     return true;
+}
+
+
+void QFbScreen::redrawNow() {
+    doRedraw();
+    mUpdatePending = false;
 }
 
 QRegion QFbScreen::doRedraw()

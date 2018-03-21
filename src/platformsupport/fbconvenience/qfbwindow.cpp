@@ -145,6 +145,8 @@ void QFbWindow::repaint(const QRegion &region)
     if (oldGeometryLocal != currentGeometry)
         platformScreen()->setDirty(oldGeometryLocal);
     platformScreen()->setDirty(dirtyRegion);
+
+    platformScreen()->redrawNow();
 }
 
 QT_END_NAMESPACE
