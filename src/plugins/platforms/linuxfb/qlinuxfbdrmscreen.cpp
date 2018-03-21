@@ -135,7 +135,7 @@ private:
     static void pageFlipHandler(int fd, unsigned int sequence,
                                 unsigned int tv_sec, unsigned int tv_usec, void *user_data);
 
-    QRegion drawFrameTimeBar(Output *output, qint64 waitTime);
+    QRegion drawFrameDropIndicator(Output *output);
 
     QVector<Output> m_outputs;
     QElapsedTimer m_timer;
@@ -327,6 +327,8 @@ void QLinuxFbDevice::pageFlipHandler(int fd, unsigned int sequence,
     Output *output = static_cast<Output *>(user_data);
     output->flipped = true;
 
+    // qDebug() << "Page flip handler: " << sequence << "(" << tv_sec << "." << tv_usec << ")";
+
     unsigned int framesDropped = sequence - output->lastSequence - 1;
     if (framesDropped > 0)
         qCDebug(qLcFbDrmTiming) << "Frames dropped: " << framesDropped;            
@@ -335,27 +337,13 @@ void QLinuxFbDevice::pageFlipHandler(int fd, unsigned int sequence,
     output->lastSequence = sequence;
 }
 
-QRegion QLinuxFbDevice::drawFrameTimeBar(Output *output, qint64 frameTime)
+QRegion QLinuxFbDevice::drawFrameDropIndicator(Output *output)
 {
     const uint32_t width = output->currentRes().width();
     int *p = (int*)(output->fb[output->backFb].p);
     
-    // full width is the time it takes to display two frames
-    // reason: because of triple buffering, it is possible to render a (single) frame in twice the frame time and still be in time if the
-    // previous frame was very fast
-    float frameTimeFraction = (float)frameTime / (2 * 1000000000 / FRAME_RATE);
-    if (frameTimeFraction > 1)
-        frameTimeFraction = 1;
-
-    uint32_t len = (int)(width * frameTimeFraction);
-    for (uint32_t y= 0; y<FRAME_TIME_HEIGHT; y++)
-    {
-        int offset = y * width;
-        for (uint32_t x=0; x<len; x++)
-            p[offset++] = 0xffffffff;
-    }
-    QRegion dirtyRegion(0, 0, len, FRAME_TIME_HEIGHT);
-
+    
+    QRegion dirtyRegion;
     if (output->lastFramesDropped > 0)
     {
         for (uint32_t y= 0; y<50; y++)
@@ -377,8 +365,7 @@ void QLinuxFbDevice::swapBuffers(Output *output)
 
     // qCDebug(qLcFbDrmTiming) << "SwapBuffers wait start";    
 
-    qint64 frameTime = m_timer.nsecsElapsed() - output->lastRenderFinished;       
-
+    qDebug("Start wait for frame buffer available");
     while (!output->flipped) {
         drmEventContext drmEvent;
         memset(&drmEvent, 0, sizeof(drmEvent));
@@ -397,25 +384,31 @@ void QLinuxFbDevice::swapBuffers(Output *output)
     // qCDebug(qLcFbDrm, "SwapBuffers wait finished");
 
     // Sleep seems to be necessary, otherwise page flips are not always executed propertly. To be investigated.
+    // qDebug("Start 1000 ms delay");
     usleep(1000);
     
     if (m_showDroppedFrames)
     {
-        QRegion frameTimeRegion = drawFrameTimeBar(output, frameTime);
-        output->dirty[output->backFb] += frameTimeRegion;
+        qDebug("Start draw frame bar");
+        QRegion frameDropIndicatorRegion = drawFrameDropIndicator(output);
+        output->dirty[output->backFb] += frameDropIndicatorRegion;
     }
 
     // schedule page flip
+    qDebug("Start schedule page flip");
     Framebuffer &fb(output->fb[output->backFb]);
     if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
         qErrnoWarning(errno, "Page flip failed");
         return;
     }
 
+
     // immediately advance back buffer, because there are three buffers
     output->backFb = (output->backFb + 1) % BUFFER_COUNT;
 
     output->lastRenderFinished = m_timer.nsecsElapsed();
+
+    qDebug("Swap buffers finished");
 }
 
 QLinuxFbDrmScreen::QLinuxFbDrmScreen(const QStringList &args)
@@ -474,8 +467,8 @@ bool QLinuxFbDrmScreen::initialize()
 
 QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDirtyRegion, QImage &destination)
 {
-    qCDebug(qLcFbDrm) << "prevFramesDirtyRegion" << prevFramesDirtyRegion;
-    qCDebug(qLcFbDrm) << "mRepaintRegion" << mRepaintRegion;
+    // qCDebug(qLcFbDrm) << "prevFramesDirtyRegion" << prevFramesDirtyRegion;
+    // qCDebug(qLcFbDrm) << "mRepaintRegion" << mRepaintRegion;
 
     const QPoint screenOffset = mGeometry.topLeft();
     QRegion touchedRegion;
@@ -489,9 +482,8 @@ QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDi
 
      if (mRepaintRegion.isEmpty()) // && (!mCursor || !mCursor->isDirty()))
     {
-         qCDebug(qLcFbDrm) << "empty repaint region";
-
-         qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
+        //  qCDebug(qLcFbDrm) << "empty repaint region";
+        //  qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
          return touchedRegion;
     }
 
@@ -506,7 +498,7 @@ QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDi
     touchedRegion += mRepaintRegion;
     mRepaintRegion += prevFramesDirtyRegion;
 
-    qCDebug(qLcFbDrm) << "draw region to framebuffer" << mRepaintRegion;
+    // qCDebug(qLcFbDrm) << "draw region to framebuffer" << mRepaintRegion;
 
     const QVector<QRect> rects = mRepaintRegion.rects();
     const QRect screenRect = mGeometry.translated(-screenOffset);
@@ -528,7 +520,9 @@ QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDi
             QFbBackingStore *backingStore = mWindowStack[layerIndex]->backingStore();
             if (backingStore) {
                 backingStore->lock();
+                // qDebug() << "doRedrawFromBackingStores draw start" << rect;
                 mPainter.drawImage(rect, backingStore->image(), windowIntersect);
+                // qDebug("doRedrawFromBackingStores draw end");
                 backingStore->unlock();
             }
         }
@@ -543,21 +537,24 @@ QRegion QLinuxFbDrmScreen::doRedrawFromBackingStores(const QRegion& prevFramesDi
     
     mRepaintRegion = QRegion();
     
-    qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
+    // qCDebug(qLcFbDrm) << "touchedRegion" << touchedRegion;
     return touchedRegion;
 }
 
 QRegion QLinuxFbDrmScreen::doRedraw()
 {
-    auto doRedrawStart = m_timer.nsecsElapsed();
+    // qDebug("doRedraw start");
 
     QLinuxFbDevice::Output *output(m_device->output(0));
 
-    qCDebug(qLcFbDrm, "drawing into buffer %d", output->backFb);
+    // qCDebug(qLcFbDrm, "drawing into buffer %d", output->backFb);
     
     const QRegion dirty = doRedrawFromBackingStores(output->dirty[output->backFb], output->fb[output->backFb].wrapper);
     if (dirty.isEmpty())
+    {
+        // qDebug("doRedraw end (dirty empty)");
         return dirty;
+    }
 
     // qCDebug(qLcFbDrm, "doRedraw after QFbScreen::doRedraw");
 
@@ -567,14 +564,17 @@ QRegion QLinuxFbDrmScreen::doRedraw()
 
         if (i != output->backFb)
         {
-            qCDebug(qLcFbDrm) << "Updating dirty region of buffer" << i << "from" << output->dirty[i] << "to" << newDirty;           
+            // qCDebug(qLcFbDrm) << "Updating dirty region of buffer" << i << "from" << output->dirty[i] << "to" << newDirty;           
         }
 
         output->dirty[i] = newDirty;
     }
 
     if (output->fb[output->backFb].wrapper.isNull())
+    {
+        // qDebug("doRedraw end (no wrapper)");
         return dirty;
+    }
 
 
     QRegion newDirtyRegion;
@@ -599,12 +599,13 @@ QRegion QLinuxFbDrmScreen::doRedraw()
     if (m_frameCounter % frameSetSize == 0)
     {
         auto fps = 1000000000.0 / ((thisTime - m_lastFrameSetTime) / frameSetSize);
-        qCDebug(qLcFbDrmTiming) << "FPS: " << fps;           
+        // qCDebug(qLcFbDrmTiming) << "FPS: " << fps;           
         m_lastFrameSetTime = thisTime;
     }
 
-    qCDebug(qLcFbDrm) << "QLinuxFbDrmScreen::doRedraw executed in " << (m_timer.nsecsElapsed() - doRedrawStart) / 1000000 << "ms";           
+    // qCDebug(qLcFbDrm) << "QLinuxFbDrmScreen::doRedraw executed in " << (m_timer.nsecsElapsed() - doRedrawStart) / 1000000 << "ms";           
 
+    // qDebug("doRedraw end");
     return dirty;
 }
 
