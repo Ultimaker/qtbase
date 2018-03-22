@@ -171,6 +171,9 @@ void QFbScreen::scheduleUpdate()
 {
     if (!mUpdatePending) {
         mUpdatePending = true;
+        // PostEvent commented out because otherwise our (copy)heavy pageflip would be executed on the UI thread
+        // and thereby minimizing the advantage of a threaded render loop.
+
         // QCoreApplication::postEvent(this, new QEvent(QEvent::UpdateRequest));
     }
 }

@@ -365,7 +365,7 @@ void QLinuxFbDevice::swapBuffers(Output *output)
 
     // qCDebug(qLcFbDrmTiming) << "SwapBuffers wait start";    
 
-    qDebug("Start wait for frame buffer available");
+    // qDebug("Start wait for frame buffer available");
     while (!output->flipped) {
         drmEventContext drmEvent;
         memset(&drmEvent, 0, sizeof(drmEvent));
@@ -389,13 +389,13 @@ void QLinuxFbDevice::swapBuffers(Output *output)
     
     if (m_showDroppedFrames)
     {
-        qDebug("Start draw frame bar");
+        // qDebug("Start draw frame bar");
         QRegion frameDropIndicatorRegion = drawFrameDropIndicator(output);
         output->dirty[output->backFb] += frameDropIndicatorRegion;
     }
 
     // schedule page flip
-    qDebug("Start schedule page flip");
+    // qDebug("Start schedule page flip");
     Framebuffer &fb(output->fb[output->backFb]);
     if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
         qErrnoWarning(errno, "Page flip failed");
@@ -408,7 +408,7 @@ void QLinuxFbDevice::swapBuffers(Output *output)
 
     output->lastRenderFinished = m_timer.nsecsElapsed();
 
-    qDebug("Swap buffers finished");
+    // qDebug("Swap buffers finished");
 }
 
 QLinuxFbDrmScreen::QLinuxFbDrmScreen(const QStringList &args)
