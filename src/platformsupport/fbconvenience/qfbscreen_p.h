@@ -100,6 +100,8 @@ public:
 
     void scheduleUpdate();
 
+    void redrawNow(); 
+
 public slots:
     virtual void setDirty(const QRect &rect);
     void setPhysicalSize(const QSize &size);
