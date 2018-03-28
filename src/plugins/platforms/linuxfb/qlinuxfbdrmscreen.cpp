@@ -141,6 +141,7 @@ private:
     QElapsedTimer m_timer;
 
     bool m_showDroppedFrames;
+    bool m_deviceInitialized;
 };
 
 QLinuxFbDevice::QLinuxFbDevice(QKmsScreenConfig *screenConfig)
@@ -149,6 +150,7 @@ QLinuxFbDevice::QLinuxFbDevice(QKmsScreenConfig *screenConfig)
     m_timer.start();
 
     m_showDroppedFrames = qEnvironmentVariableIntValue("QT_QPA_FB_DRM_SHOWDROPPEDFRAMES") != 0;
+    m_deviceInitialized = false;
 }
 
 bool QLinuxFbDevice::open()
@@ -303,6 +305,8 @@ void QLinuxFbDevice::destroyFramebuffers()
 
 void QLinuxFbDevice::setMode()
 {
+    m_deviceInitialized = true;
+    
     for (Output &output : m_outputs) {
         drmModeModeInfo &modeInfo(output.kmsOutput.modes[output.kmsOutput.mode]);
         if (drmModeSetCrtc(fd(), output.kmsOutput.crtc_id, output.fb[0].fb, 0, 0,
@@ -376,10 +380,6 @@ void QLinuxFbDevice::swapBuffers(Output *output)
         // and calls back pageFlipHandler once the flip completes.
         drmHandleEvent(fd(), &drmEvent);
     }
-    
-    // qCDebug(qLcFbDrmTiming) << "Frame time: " << (frameTime / 1000000);            
-
-    output->flipped = false;
 
     // qCDebug(qLcFbDrm, "SwapBuffers wait finished");
 
@@ -396,10 +396,17 @@ void QLinuxFbDevice::swapBuffers(Output *output)
 
     // schedule page flip
     // qDebug("Start schedule page flip");
-    Framebuffer &fb(output->fb[output->backFb]);
-    if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
-        qErrnoWarning(errno, "Page flip failed");
-        return;
+
+    if (!m_deviceInitialized)
+    {
+        setMode();
+    } else {
+        Framebuffer &fb(output->fb[output->backFb]);
+        if (drmModePageFlip(fd(), output->kmsOutput.crtc_id, fb.fb, DRM_MODE_PAGE_FLIP_EVENT, output) == -1) {
+            qErrnoWarning(errno, "Page flip failed");
+            return;
+        }
+        output->flipped = false;
     }
 
 
@@ -442,8 +449,9 @@ bool QLinuxFbDrmScreen::initialize()
     m_device->createScreens();
     // Now off to dumb buffer specifics.
     m_device->createFramebuffers();
-    // Do the modesetting.
-    m_device->setMode();
+    
+    // Mode setting disabled, because it will leave the screen black until the first frame is ready
+    // m_device->setMode();
 
     QLinuxFbDevice::Output *output(m_device->output(0));
 
