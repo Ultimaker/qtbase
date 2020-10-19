@@ -120,7 +120,7 @@ private:
 };
 
 QLinuxFbDevice::QLinuxFbDevice(QKmsScreenConfig *screenConfig)
-    : QKmsDevice(screenConfig, QStringLiteral("/dev/dri/card0"))
+    : QKmsDevice(screenConfig, QStringLiteral("/dev/dri/card1"))
 {
     m_deviceInitialized = false;
 }
