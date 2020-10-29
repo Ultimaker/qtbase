@@ -120,7 +120,11 @@ private:
 };
 
 QLinuxFbDevice::QLinuxFbDevice(QKmsScreenConfig *screenConfig)
+#ifdef ULTIMAKER_CARD0
+    : QKmsDevice(screenConfig, QStringLiteral("/dev/dri/card0"))
+#else /* ULTIMAKER_CARD0 */
     : QKmsDevice(screenConfig, QStringLiteral("/dev/dri/card1"))
+#endif /* ULTIMAKER_CARD0 */
 {
     m_deviceInitialized = false;
 }
