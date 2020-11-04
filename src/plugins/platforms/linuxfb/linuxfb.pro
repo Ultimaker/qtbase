@@ -12,7 +12,7 @@ qtHaveModule(input_support-private): \
 
 SOURCES = main.cpp \
           qlinuxfbintegration.cpp \
-          qlinuxfbscreen.cpp
+          qlinuxfbscreen.cpp 
 
 HEADERS = qlinuxfbintegration.h \
           qlinuxfbscreen.h

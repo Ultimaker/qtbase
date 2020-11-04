@@ -171,7 +171,10 @@ void QFbScreen::scheduleUpdate()
 {
     if (!mUpdatePending) {
         mUpdatePending = true;
-        QCoreApplication::postEvent(this, new QEvent(QEvent::UpdateRequest));
+        // PostEvent commented out because otherwise our (copy)heavy pageflip would be executed on the UI thread
+        // and thereby minimizing the advantage of a threaded render loop.
+
+        // QCoreApplication::postEvent(this, new QEvent(QEvent::UpdateRequest));
     }
 }
 
@@ -193,6 +196,12 @@ void QFbScreen::setGeometry(const QRect &rect)
 bool QFbScreen::initialize()
 {
     return true;
+}
+
+
+void QFbScreen::redrawNow() {
+    doRedraw();
+    mUpdatePending = false;
 }
 
 QRegion QFbScreen::doRedraw()
