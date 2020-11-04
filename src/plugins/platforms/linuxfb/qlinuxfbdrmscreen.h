@@ -41,6 +41,7 @@
 #define QLINUXFBDRMSCREEN_H
 
 #include <QtFbSupport/private/qfbscreen_p.h>
+#include <QElapsedTimer>
 
 QT_BEGIN_NAMESPACE
 
@@ -61,6 +62,17 @@ public:
 private:
     QKmsScreenConfig *m_screenConfig;
     QLinuxFbDevice *m_device;
+    QElapsedTimer m_timer;
+    qint64 m_lastFrameTime;
+    qint64 m_lastFrameSetTime;
+    int m_frameCounter;
+
+    QRegion doRedrawFromBackingStores(const QRegion& prevFramesDirtyRegion, QImage &destination);
+    QPoint m_lastPos;
+
+    bool m_clearFrames;
+private Q_SLOTS:
+    
 };
 
 QT_END_NAMESPACE

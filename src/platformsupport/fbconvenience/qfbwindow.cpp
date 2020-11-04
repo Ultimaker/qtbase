@@ -145,6 +145,9 @@ void QFbWindow::repaint(const QRegion &region)
     if (oldGeometryLocal != currentGeometry)
         platformScreen()->setDirty(oldGeometryLocal);
     platformScreen()->setDirty(dirtyRegion);
+
+    // Explicitly call redrawNow, because redraw isn't scheduled through event loop anymore
+    platformScreen()->redrawNow();
 }
 
 QT_END_NAMESPACE
